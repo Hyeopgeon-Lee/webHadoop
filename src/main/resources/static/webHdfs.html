@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>WebHDFS 파일 관리</title>
+    <link rel="stylesheet" href="/css/table.css"/>
+    <script type="text/javascript" src="/js/jquery-3.6.0.min.js"></script>
+    <script type="text/javascript">
+
+        // 파일 삭제
+        function doDelete(path) {
+            $.ajax({
+                url: "/webhdfs/v1/delete",
+                type: "DELETE",
+                data: {path: path}
+            }).then(
+                function (response) { // 성공 콜백
+                    alert("삭제되었습니다.");
+                },
+                function (error) { // 실패 콜백
+                    alert("파일 삭제 실패: " + (error.responseJSON ? error.responseJSON.message : error.statusText));
+                }
+            );
+        }
+
+
+        $(document).ready(function () {
+
+            doList(); // 리스트 조회하기
+
+            // HDFS 업로드 파일 리스트 출력하기
+            function doList(json) {
+
+                $.ajax({
+                    url: "/webhdfs/v1/list",
+                    type: "GET", // 전송방식은 Post
+                    dataType: "JSON", // 전송 결과는 JSON으로 받기
+                }).then(
+                    function (json) { // 성공
+
+                        $("#hdfsData").empty(); // 이전에 출력된 내용 모두 지우기
+
+                        const parsedData = JSON.parse(json.data)
+                        const datas = parsedData.FileStatuses.FileStatus;
+
+                        for (const data of datas) {
+                            console.info("data" + data);
+                            $("#hdfsData").append("<div class=\"divTableRow\">");
+                            $("#hdfsData").append("<div class=\"divTableCell\">" + data.type + "</div>");
+
+                            if (data.type === "FILE") { // 파일만 다운로드 가능하게 하기
+                                $("#hdfsData").append("<div class=\"divTableCell\" " +
+                                    "onclick=\"doDelete('" + data.pathSuffix + "')\">" + data.pathSuffix + "</div>");
+                            } else {
+                                $("#hdfsData").append("<div class=\"divTableCell\">" + data.owner + "</div>");
+                            }
+                            $("#hdfsData").append("<div class=\"divTableCell\">" + data.owner + "</div>");
+                            $("#hdfsData").append("<div class=\"divTableCell\">" + data.group + "</div>");
+                            $("#hdfsData").append("<div class=\"divTableCell\">" + data.permission + "</div>");
+                            $("#hdfsData").append("<div class=\"divTableCell\">" + formatDate(data.modificationTime) + "</div>");
+                            $("#hdfsData").append("</div>");
+                        }
+
+                    }
+                );
+            }
+
+            // 날짜 포맷팅 함수
+            function formatDate(timestamp) {
+                const date = new Date(timestamp);
+                return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}
+            ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+            }
+
+            // 파일 업로드
+            $("#btnSend").on("click", function () {
+
+                // AJAX 요청
+                $.ajax({
+                    url: "/webhdfs/v1/upload",
+                    type: "POST",
+                    dataType: "JSON",
+                    data: $("#f").serialize(), // form 태그 내 input 등 객체를 자동으로 전송할 형태로 변경하기
+                }).then(
+                    function (response) { // 성공 콜백
+                        alert("파일 업로드 성공: " + response.message);
+                        doList(); // 리스트 조회하기
+                    },
+                    function (error) { // 실패 콜백
+                        alert("파일 업로드 실패: " + (error.responseJSON ? error.responseJSON.message : error.statusText));
+                    }
+                );
+            });
+
+        });
+    </script>
+</head>
+<body>
+<h2>하둡분산파일시스템 Web API 기반 파일업로드, 조회, 삭제 실습</h2>
+<hr/>
+<br/>
+<form name="f" id="f">
+    <div class="divTable minimalistBlack">
+        <div class="divTableBody">
+            <div class="divTableRow">
+                <div class="divTableCell" style="width: 30%">업로드할 파일 이름</div>
+                <div class="divTableCell" style="width: 70%">
+                    <input type="text" name="path" style="width: 98%">
+                </div>
+            </div>
+            <div class="divTableRow">
+                <div class="divTableCell">업로드할 파일 내용</div>
+                <div class="divTableCell">
+                    <textarea name="content" style="width:98%"></textarea>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div>
+        <button id="btnSend" type="button">파일 업로드</button>
+    </div>
+</form>
+<br/><br/>
+<div class="divTable minimalistBlack">
+    <div class="divTableHeading">
+        <div class="divTableRow">
+            <div class="divTableHead">구분</div>
+            <div class="divTableHead">경로</div>
+            <div class="divTableHead">소유자</div>
+            <div class="divTableHead">그룹</div>
+            <div class="divTableHead">권한</div>
+            <div class="divTableHead">업로드</div>
+        </div>
+    </div>
+    <div class="divTableBody" id="hdfsData"></div>
+</div>
+</body>
+</html>
