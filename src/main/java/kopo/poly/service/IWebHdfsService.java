@@ -32,3 +32,4 @@ public interface IWebHdfsService {
     String list(WebHdfsDTO pDTO);
 
 }
+
