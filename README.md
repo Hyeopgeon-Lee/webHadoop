@@ -41,8 +41,8 @@ export WEBHDFS_UPLOAD_DIR="/01"
 ### 2. 빌드 / 자동화 테스트
 
 ```bash
-./gradlew clean test bootJar
-./gradlew bootRun
+bash ./gradlew clean test bootJar
+bash ./gradlew bootRun
 ```
 
 Windows: `gradlew.bat clean test bootJar`, `gradlew.bat bootRun`
