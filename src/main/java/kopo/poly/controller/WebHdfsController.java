@@ -1,118 +1,101 @@
 package kopo.poly.controller;
 
+import java.util.Arrays;
+
 import kopo.poly.controller.response.CommonResponse;
 import kopo.poly.dto.WebHdfsDTO;
-import kopo.poly.service.impl.WebHdfsService;
-import lombok.RequiredArgsConstructor;
+import kopo.poly.service.IWebHdfsService;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
 
-/**
- * WebHdfsController
- *
- * 웹 애플리케이션에서 HDFS와 상호작용하는 REST 컨트롤러입니다.
- * 업로드, 삭제, 디렉토리 목록 조회 API를 제공합니다.
- *
- * 엔드포인트 베이스 경로: /webhdfs/v1
- */
-@RestController
-@RequiredArgsConstructor
-@RequestMapping("/webhdfs/v1")
 @Slf4j
+@RestController
+@RequestMapping("/webhdfs/v1")
 public class WebHdfsController {
 
-    /**
-     * WebHDFS 서비스 객체 주입
-     * 실제 HDFS 연동 로직은 이 서비스에서 구현됩니다.
-     */
-    private final WebHdfsService webHdfsService;
+    private final IWebHdfsService webHdfsService;
+    private final String uploadDir;
 
-    /**
-     * HDFS에 저장되는 기본 업로드 디렉토리
-     * 클라이언트에서 전달한 상대 경로는 이 값 아래에 저장됩니다.
-     * 예: 클라이언트가 "file.txt"를 전달하면 실제 경로는 "/01/file.txt"가 됩니다.
-     */
-    private final String hdfsUploadDir = "/01";
+    public WebHdfsController(IWebHdfsService webHdfsService,
+                             @Value("${webhdfs.upload-dir:/01}") String uploadDir) {
+        this.webHdfsService = webHdfsService;
+        if (uploadDir == null || !uploadDir.startsWith("/")) {
+            throw new IllegalArgumentException("webhdfs.upload-dir must be an absolute HDFS path");
+        }
+        this.uploadDir = uploadDir.replaceAll("/+$", "");
+    }
 
-    /**
-     * 파일 업로드 API
-     *
-     * @param path    HDFS 내 상대 경로(예: "subdir/file.txt"). 서버에서는 기본 업로드 디렉토리(hdfsUploadDir)를 앞에 붙입니다.
-     * @param content 업로드할 파일의 내용(문자열)
-     * @return 업로드 결과 메시지와 함께 HTTP 200 또는 에러 상태
-     */
     @PostMapping("/upload")
     public ResponseEntity<CommonResponse<String>> upload(@RequestParam("path") String path,
-                                                         @RequestParam("content") String content) {
-
-        log.info("{}.upload Start!", this.getClass().getName());
-
+                                                           @RequestParam("content") String content) {
         try {
-            log.info("path : {}, content : {}", path, content);
-
-            WebHdfsDTO pDTO = new WebHdfsDTO();
-            pDTO.setPath(hdfsUploadDir + "/" + path);
-            pDTO.setContent(content);
-
-            String result = webHdfsService.upload(pDTO);
-
-            log.info("{}.upload End!", this.getClass().getName());
-
-            return ResponseEntity.ok(CommonResponse.of(HttpStatus.OK, "File uploaded successfully", result));
-
+            WebHdfsDTO request = new WebHdfsDTO();
+            request.setPath(resolvePath(path));
+            request.setContent(content);
+            return ResponseEntity.ok(CommonResponse.of(HttpStatus.OK,
+                    "File uploaded successfully", webHdfsService.upload(request)));
+        } catch (IllegalArgumentException e) {
+            return badRequest(e);
         } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(CommonResponse.of(HttpStatus.INTERNAL_SERVER_ERROR, "File upload failed", e.getMessage()));
+            return upstreamFailure("File upload failed", e);
         }
-
     }
 
-    /**
-     * 파일 삭제 API
-     *
-     * @param path HDFS 내 상대 경로(예: "subdir/file.txt"). 실제 경로는 기본 업로드 디렉토리를 앞에 붙여 사용합니다.
-     * @return 삭제 결과 메시지와 함께 HTTP 200 또는 에러 상태
-     */
     @DeleteMapping("/delete")
     public ResponseEntity<CommonResponse<String>> delete(@RequestParam("path") String path) {
-
-        log.info("{}.delete Start!", this.getClass().getName());
-
         try {
-            WebHdfsDTO pDTO = new WebHdfsDTO();
-            pDTO.setPath(hdfsUploadDir + "/" + path);
-
-            String result = webHdfsService.delete(pDTO);
-            return ResponseEntity.ok(CommonResponse.of(HttpStatus.OK, "File deleted successfully", result));
+            WebHdfsDTO request = new WebHdfsDTO();
+            request.setPath(resolvePath(path));
+            return ResponseEntity.ok(CommonResponse.of(HttpStatus.OK,
+                    "File deleted successfully", webHdfsService.delete(request)));
+        } catch (IllegalArgumentException e) {
+            return badRequest(e);
         } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(CommonResponse.of(HttpStatus.INTERNAL_SERVER_ERROR, "File deletion failed", e.getMessage()));
+            return upstreamFailure("File deletion failed", e);
         }
     }
 
-    /**
-     * 디렉토리 목록 조회 API
-     *
-     * 기본 업로드 디렉토리(hdfsUploadDir) 아래의 파일/디렉토리 목록을 조회합니다.
-     * @return 디렉토리 목록(문자열 형태)과 함께 HTTP 200 또는 에러 상태
-     */
     @GetMapping("/list")
     public ResponseEntity<CommonResponse<String>> list() {
-
-        log.info("{}.list Start!", this.getClass().getName());
-
         try {
-            WebHdfsDTO pDTO = new WebHdfsDTO();
-            pDTO.setPath(hdfsUploadDir);
-
-
-            String result = webHdfsService.list(pDTO);
-            return ResponseEntity.ok(CommonResponse.of(HttpStatus.OK, "Directory listed successfully", result));
+            WebHdfsDTO request = new WebHdfsDTO();
+            request.setPath(uploadDir.isEmpty() ? "/" : uploadDir);
+            return ResponseEntity.ok(CommonResponse.of(HttpStatus.OK,
+                    "Directory listed successfully", webHdfsService.list(request)));
         } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(CommonResponse.of(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to list directory", e.getMessage()));
+            return upstreamFailure("Failed to list directory", e);
         }
+    }
+
+    private String resolvePath(String relativePath) {
+        if (relativePath == null || relativePath.isBlank() || relativePath.startsWith("/")
+                || relativePath.indexOf('\\') >= 0
+                || relativePath.chars().anyMatch(Character::isISOControl)
+                || Arrays.stream(relativePath.split("/", -1)).anyMatch(segment ->
+                segment.isBlank() || segment.equals(".") || segment.equals(".."))) {
+            throw new IllegalArgumentException("Enter a relative filename without '.' or '..' segments");
+        }
+        return uploadDir + "/" + relativePath;
+    }
+
+    private ResponseEntity<CommonResponse<String>> badRequest(IllegalArgumentException e) {
+        return ResponseEntity.badRequest()
+                .body(CommonResponse.of(HttpStatus.BAD_REQUEST, e.getMessage(), null));
+    }
+
+    private ResponseEntity<CommonResponse<String>> upstreamFailure(String message, Exception e) {
+        // Do not return internal NameNode/DataNode addresses or exception traces to clients.
+        log.warn("{}: {}", message, e.toString());
+        return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
+                .body(CommonResponse.of(HttpStatus.BAD_GATEWAY,
+                        message + " (check WebHDFS connection and permissions)", null));
     }
 }
