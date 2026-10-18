@@ -1,12 +1,12 @@
 plugins {
     id 'java'
-    id 'org.springframework.boot' version '3.5.6'
+    id 'org.springframework.boot' version '4.1.1'
     id 'io.spring.dependency-management' version '1.1.7'
 }
 
 group = 'kopo'
 version = '0.0.1-SNAPSHOT'
-description = 'webHadoop'
+description = 'WebHDFS file management learning project'
 
 java {
     toolchain {
@@ -24,15 +24,17 @@ repositories {
     mavenCentral()
 }
 
-
 dependencies {
-    implementation 'org.apache.hadoop:hadoop-client:3.3.6'
-    implementation 'org.springframework.boot:spring-boot-starter-web'
-    implementation 'org.springframework.boot:spring-boot-starter-webflux'
+    // MVC server + reactive HTTP client (without a second WebFlux web server).
+    implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+    implementation 'org.springframework.boot:spring-boot-starter-webclient'
+
+    // WebHDFS is an HTTP/JSON protocol; hadoop-client is not used by any source file.
     compileOnly 'org.projectlombok:lombok'
     annotationProcessor 'org.projectlombok:lombok'
-    testImplementation 'org.springframework.boot:spring-boot-starter-test'
-    testImplementation 'io.projectreactor:reactor-test'
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+    testImplementation 'org.springframework.boot:spring-boot-starter-webclient-test'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
