@@ -1,106 +1,142 @@
 package kopo.poly.service.impl;
 
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.Arrays;
+import java.util.Map;
+import java.util.stream.Collectors;
+
 import kopo.poly.dto.WebHdfsDTO;
 import kopo.poly.service.IWebHdfsService;
-import kopo.poly.util.CmmUtil;
-import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.util.UriUtils;
+import reactor.core.publisher.Mono;
 
 /**
- * WebHDFS와 REST API 통신을 통해
- * 파일 업로드(WRITE), 삭제(DELETE), 조회(LISTSTATUS)를 수행하는 서비스 클래스
- * <p>
- * WebClient : Spring WebFlux 기반의 비동기(Non-blocking) HTTP 클라이언트
+ * Two-step WebHDFS CREATE: NameNode returns HTTP 307 with a DataNode Location,
+ * then the DataNode receives the file bytes and returns HTTP 201.
+ *
+ * WebClient is non-blocking internally; .block() is used because this sample
+ * exposes synchronous Spring MVC controller endpoints.
  */
-@Slf4j
 @Service
 public class WebHdfsService implements IWebHdfsService {
 
-    // WebClient 인스턴스 생성 (기본값: 비동기 HTTP 클라이언트)
-    private final WebClient webClient = WebClient.create();
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
 
-    /**
-     * WebHDFS 업로드 (CREATE) 기능
-     * 1단계: NameNode로 업로드 요청 (307 Redirect 응답 수신)
-     * 2단계: Redirect된 DataNode URL로 실제 파일 데이터 PUT
-     */
+    private final WebClient webClient;
+    private final String baseUrl;
+    private final String username;
+
+    public WebHdfsService(WebClient.Builder clientBuilder,
+                          @Value("${webhdfs.base-url}") String baseUrl,
+                          @Value("${webhdfs.username}") String username) {
+        this.webClient = clientBuilder.build();
+        this.baseUrl = baseUrl.replaceAll("/+$", "");
+        this.username = username;
+
+        if (!this.baseUrl.startsWith("http://") && !this.baseUrl.startsWith("https://")) {
+            throw new IllegalArgumentException("webhdfs.base-url must be HTTP or HTTPS");
+        }
+        if (username == null || username.isBlank()) {
+            throw new IllegalArgumentException("webhdfs.username must not be empty");
+        }
+    }
+
     @Override
-    public String upload(WebHdfsDTO pDTO) {
+    public String upload(WebHdfsDTO request) {
+        URI createUri = buildUri(request.getPath(), "CREATE", "&overwrite=true");
+        byte[] bytes = (request.getContent() == null ? "" : request.getContent())
+                .getBytes(StandardCharsets.UTF_8);
 
-        log.info("{}.upload Start!", this.getClass().getName());
-        log.info("pDTO : {}", pDTO);
-
-        // 업로드할 경로 및 내용 추출
-        String hdfsPath = CmmUtil.nvl(pDTO.getPath());
-        String content = CmmUtil.nvl(pDTO.getContent());
-
-        // CREATE API 호출 URL 구성
-        String uri = HDFS_URI + hdfsPath + "?op=CREATE" + "&user.name=" + USER_NAME + "&overwrite=true";
-        log.info("uri : {}", uri);
-
-        // Step 1: NameNode에 파일 생성 요청
-        // (리다이렉트 발생 시 DataNode URL로 이동)
-        return webClient.put().uri(uri).bodyValue(content).exchangeToMono(response -> {
-
-                    // 307/308 Redirect인 경우 → DataNode 주소로 다시 PUT 요청
-                    if (response.statusCode().is3xxRedirection()) {
-                        String redirectUri = response.headers().asHttpHeaders().getLocation().toString();
-
-                        log.info("Redirect URI: {}", redirectUri);
-
-                        // Step 2: DataNode로 실제 파일 업로드 요청
-                        return webClient.put().uri(redirectUri).bodyValue(content).retrieve().bodyToMono(String.class);
-                    } else {
-                        // Redirect가 아닐 경우 그대로 응답 본문 반환
-                        return response.bodyToMono(String.class);
+        // Do NOT send the content to the NameNode: WebHDFS CREATE requires a
+        // body-less request first and file bytes only on the redirected PUT.
+        String result = webClient.put().uri(createUri)
+                .exchangeToMono(response -> {
+                    if (response.statusCode().value() != HttpStatus.TEMPORARY_REDIRECT.value()) {
+                        return response.createException().flatMap(error ->
+                                Mono.error(new IllegalStateException(
+                                        "NameNode CREATE did not return HTTP 307 (received "
+                                                + response.statusCode().value() + ")", error)));
                     }
+
+                    URI dataNodeUri = response.headers().asHttpHeaders().getLocation();
+                    if (dataNodeUri == null || !dataNodeUri.isAbsolute()
+                            || !("http".equalsIgnoreCase(dataNodeUri.getScheme())
+                            || "https".equalsIgnoreCase(dataNodeUri.getScheme()))) {
+                        return Mono.error(new IllegalStateException("Invalid DataNode redirect Location"));
+                    }
+
+                    return webClient.put().uri(dataNodeUri)
+                            .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                            .bodyValue(bytes)
+                            .exchangeToMono(dataNodeResponse -> {
+                                if (dataNodeResponse.statusCode().value() == HttpStatus.CREATED.value()) {
+                                    // WebHDFS returns HTTP 201 with an EMPTY body on success.
+                                    return dataNodeResponse.releaseBody().thenReturn("true");
+                                }
+                                return dataNodeResponse.createException().flatMap(Mono::error);
+                            });
                 })
-                // block(): 비동기 작업 결과를 동기적으로 기다림
-                .block();
+                .block(REQUEST_TIMEOUT);
+
+        if (!"true".equals(result)) {
+            throw new IllegalStateException("WebHDFS upload was not acknowledged");
+        }
+        return result;
     }
 
-    /**
-     * WebHDFS 파일 삭제 기능
-     * op=DELETE 요청으로 해당 경로 파일/디렉토리 제거
-     */
     @Override
-    public String delete(WebHdfsDTO pDTO) {
+    public String delete(WebHdfsDTO request) {
+        // Hadoop may respond 200 with {"boolean":false}; that is NOT success.
+        Map<?, ?> result = webClient.delete()
+                .uri(buildUri(request.getPath(), "DELETE", ""))
+                .retrieve()
+                .bodyToMono(Map.class)
+                .block(REQUEST_TIMEOUT);
 
-        log.info("{}.delete Start!", this.getClass().getName());
-        log.info("pDTO : {}", pDTO);
-
-        // 삭제할 경로
-        String hdfsPath = CmmUtil.nvl(pDTO.getPath());
-
-        // DELETE API 호출 URL 구성
-        String uri = HDFS_URI + hdfsPath + "?op=DELETE" + "&user.name=" + USER_NAME;
-        log.info("uri : {}", uri);
-
-
-        // DELETE 요청 수행 (응답 JSON: {"boolean":true/false})
-        return webClient.delete().uri(uri).retrieve().bodyToMono(String.class).block();
+        if (result == null || !Boolean.TRUE.equals(result.get("boolean"))) {
+            throw new IllegalStateException("WebHDFS did not delete the requested file");
+        }
+        return "true";
     }
 
-    /**
-     * WebHDFS 파일 목록 조회 기능
-     * op=LISTSTATUS 요청으로 디렉터리 내 파일 리스트 반환
-     */
     @Override
-    public String list(WebHdfsDTO pDTO) {
+    public String list(WebHdfsDTO request) {
+        String result = webClient.get()
+                .uri(buildUri(request.getPath(), "LISTSTATUS", ""))
+                .retrieve()
+                .bodyToMono(String.class)
+                .block(REQUEST_TIMEOUT);
+        if (result == null || result.isBlank()) {
+            throw new IllegalStateException("WebHDFS returned an empty LISTSTATUS result");
+        }
+        return result;
+    }
 
-        log.info("{}.listFiles Start!", this.getClass().getName());
-        log.info("pDTO : {}", pDTO);
+    private URI buildUri(String path, String operation, String extraQuery) {
+        if (path == null || !path.startsWith("/") || path.equals("/")
+                || path.indexOf('\\') >= 0 || path.chars().anyMatch(Character::isISOControl)) {
+            throw new IllegalArgumentException("Invalid HDFS path");
+        }
 
-        // 조회할 경로
-        String hdfsPath = CmmUtil.nvl(pDTO.getPath());
+        String[] segments = path.substring(1).split("/", -1);
+        if (Arrays.stream(segments).anyMatch(s -> s.isBlank()
+                || s.equals(".") || s.equals(".."))) {
+            throw new IllegalArgumentException("Invalid HDFS path segment");
+        }
 
-        // LISTSTATUS API 호출 URL 구성
-        String uri = HDFS_URI + hdfsPath + "?op=LISTSTATUS" + "&user.name=" + USER_NAME;
-        log.info("uri : {}", uri);
-
-
-        // GET 요청 → 파일 목록(JSON 문자열 형태)
-        return webClient.get().uri(uri).retrieve().bodyToMono(String.class).block();
+        String encodedPath = Arrays.stream(segments)
+                .map(s -> UriUtils.encodePathSegment(s, StandardCharsets.UTF_8))
+                .collect(Collectors.joining("/"));
+        String encodedUser = UriUtils.encodeQueryParam(username, StandardCharsets.UTF_8);
+        return URI.create(baseUrl + "/" + encodedPath
+                + "?op=" + operation + "&user.name=" + encodedUser + extraQuery);
     }
 }
